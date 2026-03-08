@@ -41,7 +41,7 @@ SEARCHES = [
     },
     {
         "district": "Włochy",
-        ""url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/wlochy?viewType=listing&limit=36",
+        "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/wlochy?viewType=listing&limit=36",
     },
 ]
 
