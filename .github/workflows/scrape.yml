@@ -1,0 +1,44 @@
+name: Warsaw Flat Scraper
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # Every day at 7:00 AM UTC (9:00 AM Warsaw time)
+  workflow_dispatch:        # Allows manual trigger from GitHub UI anytime
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Restore flat database from cache
+        uses: actions/cache@v4
+        with:
+          path: flats_db.json
+          key: flats-db-${{ github.run_id }}
+          restore-keys: |
+            flats-db-
+
+      - name: Run scraper
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: python scraper.py
+
+      - name: Save updated database
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: flats_db.json
+          key: flats-db-${{ github.run_id }}
