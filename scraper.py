@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Warsaw Flat Scraper — Otodom JSON API edition
-Scrapes Otodom's internal API for flats in Ochota & Włochy.
-Scores each flat, tracks price changes, notifies via Discord.
+Warsaw Flat Scraper — Otodom __NEXT_DATA__ edition
+Parses the JSON blob Otodom embeds in every search results page.
+No private API needed — same data the browser sees.
 """
 
 import json
 import os
+import re
 import time
 import hashlib
 from datetime import datetime
 from pathlib import Path
 
 import requests
+from bs4 import BeautifulSoup
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -21,122 +23,179 @@ DB_FILE                = Path("flats_db.json")
 SCORE_NOTIFY_THRESHOLD = 130
 PRICE_DROP_NOTIFY_PCT  = 2
 
-# ── Otodom API ────────────────────────────────────────────────────────────────
-# District IDs: Ochota = 39, Włochy = 44
-
-OTODOM_API = "https://www.otodom.pl/api/offers/"
-
-SEARCHES = [
-    {"district": "Ochota", "subregion": "39"},
-    {"district": "Włochy", "subregion": "44"},
-]
-
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json",
-    "Accept-Language": "pl-PL,pl;q=0.9",
-    "Referer": "https://www.otodom.pl/",
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-def fetch_otodom_page(district_id: str, page: int = 1) -> dict:
-    params = {
-        "distanceRadius": 0,
-        "market": "ALL",
-        "ownerTypeSingleSelect": "ALL",
-        "viewType": "listing",
-        "by": "DEFAULT",
-        "direction": "DESC",
-        "limit": 36,
-        "page": page,
-        "subregionId": district_id,
-        "filterFloat_price.gte": 300000,
-        "filterFloat_price.lte": 2000000,
-        "category": "FLAT",
-        "transactionType": "SELL",
-    }
-    try:
-        r = requests.get(OTODOM_API, params=params, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"  WARNING: Otodom API error (district {district_id}, page {page}): {e}")
-        return {}
+# Otodom search URLs — /pl/wyniki/ is the correct working format
+SEARCHES = [
+    {
+        "district": "Ochota",
+        "url": "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/ochota?viewType=listing&limit=36",
+    },
+    {
+        "district": "Włochy",
+        "url": "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/wlochy?viewType=listing&limit=36",
+    },
+]
 
-def fetch_otodom_listings(district: str, district_id: str) -> list:
+# ── Scraping ──────────────────────────────────────────────────────────────────
+
+def fetch_listings(district: str, base_url: str, max_pages: int = 3) -> list:
     results = []
-    for page in range(1, 4):
-        print(f"  Otodom API -> {district} page {page}")
-        data = fetch_otodom_page(district_id, page)
-        items = data.get("items", [])
+    for page in range(1, max_pages + 1):
+        url = base_url if page == 1 else f"{base_url}&page={page}"
+        print(f"  Fetching {district} page {page} ...")
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"  WARNING: {e}")
+            break
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+        if not script_tag:
+            print(f"  WARNING: No __NEXT_DATA__ found on page {page}")
+            break
+
+        try:
+            data = json.loads(script_tag.string)
+        except Exception as e:
+            print(f"  WARNING: JSON parse error: {e}")
+            break
+
+        # Navigate to listings — path varies slightly by Otodom version
+        try:
+            page_props = data["props"]["pageProps"]
+            # Try main path first, then fallback paths
+            items = (
+                page_props.get("data", {}).get("searchAds", {}).get("items")
+                or page_props.get("searchAds", {}).get("items")
+                or page_props.get("listings", {}).get("listing", {}).get("results")
+                or []
+            )
+        except Exception as e:
+            print(f"  WARNING: Could not navigate data structure: {e}")
+            break
+
         if not items:
-            print(f"    No items on page {page}, stopping.")
+            print(f"  No items on page {page}, stopping.")
             break
+
+        print(f"  -> {len(items)} listings on page {page}")
+
         for item in items:
-            loc    = item.get("location", {})
-            addr   = loc.get("address", {})
-            street = addr.get("street", {}).get("name", "") or ""
+            try:
+                # Location
+                loc    = item.get("location", {})
+                addr   = loc.get("address", {})
+                street = ""
+                if isinstance(addr.get("street"), dict):
+                    street = addr["street"].get("name", "")
+                elif isinstance(addr.get("street"), str):
+                    street = addr["street"]
 
-            price_obj = item.get("totalPrice") or item.get("price") or {}
-            price     = price_obj.get("value") if isinstance(price_obj, dict) else price_obj
+                # Price
+                price = None
+                for key in ("totalPrice", "price"):
+                    p = item.get(key)
+                    if isinstance(p, dict):
+                        price = p.get("value")
+                    elif isinstance(p, (int, float)):
+                        price = p
+                    if price:
+                        break
 
-            area = item.get("areaInSquareMeters") or item.get("area")
+                # Area
+                area = item.get("areaInSquareMeters") or item.get("area") or item.get("floorSize")
 
-            czynsz = None
-            year   = None
-            for ch in item.get("characteristics", []):
-                k = ch.get("key", "")
-                v = ch.get("value", "")
-                if k in ("rent", "czynsz", "additional_costs"):
-                    try: czynsz = int(float(str(v).replace(" ", "").replace(",", ".")))
-                    except Exception: pass
-                if k == "build_year":
-                    try: year = int(v)
-                    except Exception: pass
+                # Czynsz & year from characteristics
+                czynsz, year = None, None
+                for ch in item.get("characteristics", []):
+                    k = ch.get("key", "")
+                    v = str(ch.get("value", ""))
+                    if k in ("rent", "czynsz", "additional_costs"):
+                        try: czynsz = int(float(v.replace(" ", "").replace(",", ".")))
+                        except: pass
+                    if k == "build_year":
+                        try: year = int(v)
+                        except: pass
 
-            slug = item.get("slug", "")
-            url  = f"https://www.otodom.pl/pl/oferta/{slug}" if slug else ""
-            imgs = item.get("images") or [{}]
-            img  = imgs[0].get("large", "") if imgs else ""
+                # Fallback year from title/description
+                if not year:
+                    text = item.get("title", "") + " " + item.get("description", "")
+                    m = re.search(r"\b(19[5-9]\d|20[0-2]\d)\b", text)
+                    if m:
+                        year = int(m.group())
 
-            results.append({
-                "source":   "Otodom.pl",
-                "district": district,
-                "title":    item.get("title", "").strip(),
-                "street":   street,
-                "price":    int(price) if price else None,
-                "area":     float(area) if area else None,
-                "czynsz":   czynsz,
-                "year":     year,
-                "url":      url,
-                "image":    img,
-            })
-        total_pages = data.get("pagination", {}).get("totalPages", 1)
-        if page >= total_pages:
+                # URL
+                slug = item.get("slug") or item.get("id", "")
+                listing_url = f"https://www.otodom.pl/pl/oferta/{slug}" if slug else ""
+
+                # Image
+                imgs = item.get("images") or item.get("photos") or [{}]
+                img  = ""
+                if imgs and isinstance(imgs[0], dict):
+                    img = imgs[0].get("large") or imgs[0].get("medium") or imgs[0].get("url") or ""
+
+                if price and area:
+                    results.append({
+                        "source":   "Otodom.pl",
+                        "district": district,
+                        "title":    item.get("title", "").strip(),
+                        "street":   street,
+                        "price":    int(price),
+                        "area":     float(area),
+                        "czynsz":   czynsz,
+                        "year":     year,
+                        "url":      listing_url,
+                        "image":    img,
+                    })
+            except Exception as e:
+                print(f"  WARNING: Could not parse item: {e}")
+                continue
+
+        # Check if more pages exist
+        try:
+            pagination = (
+                data["props"]["pageProps"].get("data", {}).get("searchAds", {}).get("pagination")
+                or {}
+            )
+            total_pages = pagination.get("totalPages", 1)
+            if page >= total_pages:
+                break
+        except:
             break
-        time.sleep(1.2)
+
+        time.sleep(1.5)
+
     return results
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 PREMIUM_STREETS = {
-    "Ochota": ["wlodarzewska", "grOjecka", "bitwy warszawskiej", "tarczynska", "sekocinska", "szczesliwicka",
-               "włodarzewska", "grójecka", "tarczyńska", "sękocińska", "szczęśliwicka"],
-    "Wlochy": ["wlodarzewska", "popularowa", "1 sierpnia", "aleje jerozolimskie", "hynka",
-               "włodarzewska"],
+    "Ochota": ["włodarzewska", "wlodarzewska", "grójecka", "grojecka",
+               "bitwy warszawskiej", "tarczyńska", "tarczynska",
+               "sękocińska", "sekocinska", "szczęśliwicka", "szczesliwicka"],
+    "Włochy": ["włodarzewska", "wlodarzewska", "popularowa",
+               "1 sierpnia", "aleje jerozolimskie", "hynka"],
 }
 
 def score_flat(flat: dict) -> int:
-    score = 100
     price = flat.get("price", 0)
-    area  = flat.get("area", 1) or 1
+    area  = flat.get("area") or 1
     if not price: return 0
-    ppm2 = price / area
+    ppm2  = price / area
+    score = 100
 
-    # 1. Price/m2 — 40pts
+    # 1. Price/m² — 40pts
     if ppm2 < 10000:   score += 40
     elif ppm2 < 12000: score += 28
     elif ppm2 < 14000: score += 14
@@ -148,10 +207,10 @@ def score_flat(flat: dict) -> int:
     # 2. Location — 30pts
     district = flat.get("district", "")
     street   = flat.get("street", "").lower()
-    premium  = PREMIUM_STREETS.get(district, []) + PREMIUM_STREETS.get("Wlochy" if district == "Włochy" else district, [])
-    if any(s.lower() in street for s in premium if s): score += 30
-    elif district == "Ochota": score += 12
-    elif district == "Włochy": score += 8
+    premium  = PREMIUM_STREETS.get(district, [])
+    if any(s in street for s in premium): score += 30
+    elif district == "Ochota":            score += 12
+    elif district == "Włochy":            score += 8
 
     # 3. Czynsz — 20pts
     czynsz = flat.get("czynsz") or 0
@@ -163,14 +222,14 @@ def score_flat(flat: dict) -> int:
         elif czynsz > 1200: score -= 18
         else:               score -= 10
 
-    # 4. Build year — 10pts (post-2000 = full marks)
+    # 4. Build year — 10pts
     year = flat.get("year") or 0
     if year:
         if year >= 2000:   score += 10
         elif year >= 1990: score += 4
         elif year < 1970:  score -= 8
 
-    # 5. Area sweet spot ~50m2
+    # 5. Area sweet spot ~50m²
     if 48 <= area <= 52:         score += 16
     elif 43 <= area <= 57:       score += 10
     elif 38 <= area <= 63:       score += 4
@@ -268,8 +327,8 @@ def run():
     all_listings = []
 
     for s in SEARCHES:
-        listings = fetch_otodom_listings(s["district"], s["subregion"])
-        print(f"  -> {len(listings)} listings for {s['district']}")
+        listings = fetch_listings(s["district"], s["url"])
+        print(f"  -> {len(listings)} valid listings for {s['district']}")
         all_listings += listings
 
     print(f"\nTotal scraped: {len(all_listings)}")
