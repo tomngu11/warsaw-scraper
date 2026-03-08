@@ -37,11 +37,11 @@ HEADERS = {
 SEARCHES = [
     {
         "district": "Ochota",
-        "url": "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/ochota?viewType=listing&limit=36",
+        "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/ochota?viewType=listing&limit=36",
     },
     {
         "district": "Włochy",
-        "url": "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/wlochy?viewType=listing&limit=36",
+        ""url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/wlochy?viewType=listing&limit=36",
     },
 ]
 
