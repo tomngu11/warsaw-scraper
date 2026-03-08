@@ -1,9 +1,11 @@
 name: Warsaw Flat Scraper
 
 on:
+  push:
+    branches: [main, master]
   schedule:
-    - cron: '0 7 * * *'   # Every day at 7:00 AM UTC (9:00 AM Warsaw time)
-  workflow_dispatch:        # Allows manual trigger from GitHub UI anytime
+    - cron: '0 7 * * *'
+  workflow_dispatch:
 
 jobs:
   scrape:
