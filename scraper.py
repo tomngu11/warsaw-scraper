@@ -42,7 +42,6 @@ MIN_YEAR   = 1995       # lowered from 2005 (catches good older builds like Wło
 SEARCHES = [
     {
         "district": "Ochota",
-<<<<<<< HEAD
         "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/ochota?viewType=listing&limit=36&filterFloat_price.lte=1050000&filterFloat_buildYear.gte=1995",
     },
     {
@@ -52,13 +51,6 @@ SEARCHES = [
     {
         "district": "Włochy",  # Raków is a sub-district of Włochy, separate search needed
         "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/wlochy/warszawa/rakow?viewType=listing&limit=36&filterFloat_price.lte=1050000&filterFloat_buildYear.gte=1995",
-=======
-        "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/ochota?viewType=listing&limit=36",
-    },
-    {
-        "district": "Włochy",
-        "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/wlochy?viewType=listing&limit=36",
->>>>>>> bfe41fdfff810b5a848b2a183704db86d69edc26
     },
 ]
 
