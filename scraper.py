@@ -111,6 +111,18 @@ def fetch_listings(district: str, base_url: str, max_pages: int = 3) -> list:
                 elif isinstance(addr.get("street"), str):
                     street = addr["street"]
 
+                # City — must be Warszawa, reject anything else
+                city = ""
+                if isinstance(addr.get("city"), dict):
+                    city = addr["city"].get("name", "")
+                elif isinstance(addr.get("city"), str):
+                    city = addr["city"]
+                # Also check province-level city field
+                if not city:
+                    city = loc.get("mapDetails", {}).get("city", "") or ""
+                if "warszawa" not in city.lower() and "warsaw" not in city.lower():
+                    continue  # not Warsaw, skip
+
                 # Price
                 price = None
                 for key in ("totalPrice", "price"):
@@ -363,8 +375,8 @@ def run():
         if flat["price"] > MAX_PRICE:
             continue  # over 1 050 000 PLN budget
         year = flat.get("year")
-        if year and year < MIN_YEAR:
-            continue  # pre-1995
+        if not year or year < MIN_YEAR:
+            continue  # no year info or pre-1995 — skip
         floor = flat.get("floor")
         if floor is not None:
             is_ground = (floor == 0 or str(floor).lower() in ("0", "parter", "ground"))
