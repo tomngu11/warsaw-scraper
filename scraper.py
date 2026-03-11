@@ -33,15 +33,24 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# Otodom search URLs — /pl/wyniki/ is the correct working format
+# Hard filters applied before scoring
+MAX_PRICE  = 1_050_000  # raised from 950k
+MIN_YEAR   = 1995       # lowered from 2005 (catches good older builds like Włodarzewska 1998)
+# Floor filter (no ground floor) applied in parsing — see main loop
+
+# Otodom search URLs — price cap and year filter baked in where possible
 SEARCHES = [
     {
         "district": "Ochota",
-        "url": "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/ochota?viewType=listing&limit=36",
+        "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/ochota?viewType=listing&limit=36&filterFloat_price.lte=1050000&filterFloat_buildYear.gte=1995",
     },
     {
         "district": "Włochy",
-        "url": "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/wlochy?viewType=listing&limit=36",
+        "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/wlochy?viewType=listing&limit=36&filterFloat_price.lte=1050000&filterFloat_buildYear.gte=1995",
+    },
+    {
+        "district": "Włochy",  # Raków is a sub-district of Włochy, separate search needed
+        "url": "https://www.otodom.pl/pl/oferty/sprzedaz/mieszkanie/warszawa/wlochy/warszawa/rakow?viewType=listing&limit=36&filterFloat_price.lte=1050000&filterFloat_buildYear.gte=1995",
     },
 ]
 
@@ -116,8 +125,8 @@ def fetch_listings(district: str, base_url: str, max_pages: int = 3) -> list:
                 # Area
                 area = item.get("areaInSquareMeters") or item.get("area") or item.get("floorSize")
 
-                # Czynsz & year from characteristics
-                czynsz, year = None, None
+                # Czynsz, year & floor from characteristics
+                czynsz, year, floor = None, None, None
                 for ch in item.get("characteristics", []):
                     k = ch.get("key", "")
                     v = str(ch.get("value", ""))
@@ -127,6 +136,9 @@ def fetch_listings(district: str, base_url: str, max_pages: int = 3) -> list:
                     if k == "build_year":
                         try: year = int(v)
                         except: pass
+                    if k in ("floor", "floor_no"):
+                        try: floor = int(v)
+                        except: floor = v  # sometimes "parter" string
 
                 # Fallback year from title/description
                 if not year:
@@ -155,6 +167,7 @@ def fetch_listings(district: str, base_url: str, max_pages: int = 3) -> list:
                         "area":     float(area),
                         "czynsz":   czynsz,
                         "year":     year,
+                        "floor":    floor,
                         "url":      listing_url,
                         "image":    img,
                     })
@@ -195,39 +208,43 @@ def score_flat(flat: dict) -> int:
     ppm2  = price / area
     score = 100
 
-    # 1. Price/m² — 40pts
-    if ppm2 < 10000:   score += 40
-    elif ppm2 < 12000: score += 28
-    elif ppm2 < 14000: score += 14
-    elif ppm2 < 16000: score += 4
+    # 1. Build year — TOP PRIORITY (newest first)
+    year = flat.get("year") or 0
+    if year:
+        if year >= 2020:   score += 40
+        elif year >= 2015: score += 32
+        elif year >= 2010: score += 22
+        elif year >= 2005: score += 12
+        elif year >= 2000: score += 5   # 2000-2004: allowed, modest bonus
+        elif year >= 1995: score += 0   # 1995-1999: neutral, passes filter
+        else:              score -= 20  # pre-1995: safety net, shouldn't appear
+
+    # 2. Price/m² — 35pts
+    if ppm2 < 10000:   score += 35
+    elif ppm2 < 12000: score += 24
+    elif ppm2 < 14000: score += 12
+    elif ppm2 < 16000: score += 3
     elif ppm2 < 18000: score -= 8
     elif ppm2 < 20000: score -= 18
-    else:              score -= 30
+    else:              score -= 28
 
-    # 2. Location — 30pts
+    # 3. Location — 25pts
     district = flat.get("district", "")
     street   = flat.get("street", "").lower()
     premium  = PREMIUM_STREETS.get(district, [])
-    if any(s in street for s in premium): score += 30
-    elif district == "Ochota":            score += 12
-    elif district == "Włochy":            score += 8
+    if any(s in street for s in premium): score += 25
+    elif district == "Ochota":            score += 10
+    elif district == "Włochy":            score += 6
 
-    # 3. Czynsz — 20pts
+    # 4. Czynsz — 15pts
     czynsz = flat.get("czynsz") or 0
     if czynsz:
-        if czynsz < 400:    score += 20
-        elif czynsz < 600:  score += 13
-        elif czynsz < 800:  score += 6
+        if czynsz < 400:    score += 15
+        elif czynsz < 600:  score += 10
+        elif czynsz < 800:  score += 4
         elif czynsz < 1000: score -= 4
-        elif czynsz > 1200: score -= 18
-        else:               score -= 10
-
-    # 4. Build year — 10pts
-    year = flat.get("year") or 0
-    if year:
-        if year >= 2000:   score += 10
-        elif year >= 1990: score += 4
-        elif year < 1970:  score -= 8
+        elif czynsz > 1200: score -= 14
+        else:               score -= 8
 
     # 5. Area sweet spot ~50m²
     if 48 <= area <= 52:         score += 16
@@ -271,6 +288,7 @@ def send_discord_alert(flat: dict, reason: str, score: int, old_price=None):
         {"name": "Price/m2",  "value": fmt_pln(ppm2),              "inline": True},
         {"name": "District",  "value": flat.get("district", "?"),  "inline": True},
         {"name": "Street",    "value": flat.get("street") or "?",  "inline": True},
+        {"name": "Floor",     "value": str(flat.get("floor") or "?"), "inline": True},
         {"name": "Year",      "value": str(flat.get("year") or "?"), "inline": True},
         {"name": "Czynsz/mo", "value": fmt_pln(flat.get("czynsz")), "inline": True},
         {"name": "Score",     "value": f"{score} — {score_label(score)}", "inline": True},
@@ -340,6 +358,18 @@ def run():
     for flat in all_listings:
         if not flat.get("price") or not flat.get("area") or not flat.get("url"):
             continue
+
+        # Hard filters
+        if flat["price"] > MAX_PRICE:
+            continue  # over 1 050 000 PLN budget
+        year = flat.get("year")
+        if year and year < MIN_YEAR:
+            continue  # pre-1995
+        floor = flat.get("floor")
+        if floor is not None:
+            is_ground = (floor == 0 or str(floor).lower() in ("0", "parter", "ground"))
+            if is_ground:
+                continue  # no ground floor
 
         fid   = flat_id(flat["url"])
         score = score_flat(flat)
